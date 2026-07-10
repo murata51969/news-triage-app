@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ニュース評価</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --text: #1a1a1a; --sub: #667085;
+    --line: #e4e7ec; --accent: #2563eb;
+    --adopt: #16a34a; --maybe: #d97706; --reject: #6b7280;
+    --danger: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101418; --card: #1c2128; --text: #e6e8ea; --sub: #9aa4b2;
+      --line: #30363d; --accent: #4c8dff;
+      --adopt: #22c55e; --maybe: #f59e0b; --reject: #8b949e;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--card);
+  }
+  header h1 { font-size: 15px; font-weight: 600; }
+  header .actions { display: flex; gap: 6px; }
+  header button {
+    font-size: 12px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: transparent; color: var(--sub);
+  }
+  #syncState { font-size: 11px; color: var(--sub); }
+  main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+  .screen { flex: 1; overflow-y: auto; padding: 14px; display: none; }
+  .screen.active { display: flex; flex-direction: column; }
+
+  /* --- 設定画面 --- */
+  #setup label { display: block; font-size: 12px; color: var(--sub); margin: 12px 0 4px; }
+  #setup input {
+    width: 100%; padding: 12px; font-size: 15px; border: 1px solid var(--line);
+    border-radius: 10px; background: var(--card); color: var(--text);
+  }
+  #setup .help {
+    margin-top: 16px; padding: 12px; background: var(--card); border-radius: 10px;
+    font-size: 12px; color: var(--sub); line-height: 1.7;
+  }
+  #setup .help a { color: var(--accent); }
+  #setup button.primary {
+    margin-top: 16px; width: 100%; padding: 14px; font-size: 16px; font-weight: 600;
+    color: #fff; background: var(--accent); border: none; border-radius: 12px;
+  }
+
+  /* --- 評価画面 --- */
+  #progress { font-size: 12px; color: var(--sub); text-align: center; margin-bottom: 8px; }
+  .card {
+    flex: 1; display: flex; flex-direction: column; background: var(--card);
+    border: 1px solid var(--line); border-radius: 16px; padding: 16px; overflow: hidden;
+    min-height: 0;
+  }
+  .card .meta { font-size: 12px; color: var(--sub); margin-bottom: 6px; }
+  .card h2 { font-size: 17px; line-height: 1.45; margin-bottom: 10px; }
+  .card .body {
+    flex: 1; overflow-y: auto; font-size: 14px; line-height: 1.8; color: var(--text);
+    -webkit-overflow-scrolling: touch; padding-bottom: 8px; min-height: 0;
+  }
+  .card .srclink { margin-top: 8px; }
+  .card .srclink a { font-size: 13px; color: var(--accent); text-decoration: none; }
+  .verdicts { display: flex; gap: 8px; margin-top: 12px; }
+  .verdicts button {
+    flex: 1; padding: 16px 0; font-size: 16px; font-weight: 700; color: #fff;
+    border: none; border-radius: 14px; touch-action: manipulation;
+  }
+  .verdicts .adopt  { background: var(--adopt); }
+  .verdicts .maybe  { background: var(--maybe); }
+  .verdicts .reject { background: var(--reject); }
+  .subactions { display: flex; justify-content: center; margin-top: 10px; }
+  .subactions button {
+    font-size: 13px; color: var(--sub); background: transparent; border: none; padding: 8px 16px;
+  }
+  .done-box { text-align: center; margin: auto; color: var(--sub); font-size: 14px; line-height: 2; }
+  .done-box .big { font-size: 40px; }
+
+  /* --- 一覧画面 --- */
+  #summary { display: flex; gap: 8px; margin-bottom: 12px; }
+  #summary .chip {
+    flex: 1; text-align: center; padding: 10px 0; border-radius: 10px; background: var(--card);
+    border: 1px solid var(--line); font-size: 12px; color: var(--sub);
+  }
+  #summary .chip b { display: block; font-size: 18px; color: var(--text); }
+  .rowitem {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; margin-bottom: 8px; display: flex; align-items: center; gap: 10px;
+  }
+  .rowitem .v {
+    flex-shrink: 0; font-size: 12px; font-weight: 700; color: #fff;
+    padding: 6px 10px; border-radius: 8px; border: none;
+  }
+  .rowitem .v.採用 { background: var(--adopt); }
+  .rowitem .v.候補 { background: var(--maybe); }
+  .rowitem .v.不採用 { background: var(--reject); }
+  .rowitem .t { font-size: 13px; line-height: 1.5; flex: 1; }
+  .rowitem .t small { color: var(--sub); display: block; font-size: 11px; }
+
+  #banner {
+    display: none; text-align: center; font-size: 12px; padding: 6px;
+    background: var(--maybe); color: #fff;
+  }
+  #toast {
+    position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,.8); color: #fff; font-size: 13px; padding: 10px 18px;
+    border-radius: 20px; opacity: 0; transition: opacity .3s; pointer-events: none;
+    max-width: 90%; text-align: center;
+  }
+  #toast.show { opacity: 1; }
+  .spinner { margin: auto; color: var(--sub); font-size: 14px; text-align: center; line-height: 2; }
+</style>
+</head>
+<body>
+<div id="banner"></div>
+<header>
+  <h1 id="title">ニュース評価</h1>
+  <div style="display:flex;align-items:center;gap:10px">
+    <span id="syncState"></span>
+    <div class="actions">
+      <button id="navReview">評価</button>
+      <button id="navList">一覧</button>
+      <button id="navSetup">設定</button>
+    </div>
+  </div>
+</header>
+<main>
+  <!-- 設定 -->
+  <section id="setup" class="screen">
+    <label>GitHub ユーザー名（owner）</label>
+    <input id="inOwner" autocapitalize="none" autocorrect="off" placeholder="例: octocat">
+    <label>リポジトリ名（repo）</label>
+    <input id="inRepo" autocapitalize="none" autocorrect="off" placeholder="例: my-news-repo">
+    <label>プロファイル名（data/ 配下のフォルダ名）</label>
+    <input id="inProfile" autocapitalize="none" autocorrect="off" placeholder="例: mytopic">
+    <label>アクセストークン（fine-grained PAT）</label>
+    <input id="inToken" type="password" autocapitalize="none" placeholder="github_pat_...">
+    <div class="help">
+      <b>トークンの作り方（初回のみ・スマホでOK）</b><br>
+      1. <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub のトークン作成ページ</a>を開く（要ログイン）<br>
+      2. Token name: 任意（例 news-review）／ Expiration: 1年など<br>
+      3. Repository access: <b>Only select repositories</b> → 対象リポジトリを選択<br>
+      4. Permissions → Repository permissions → <b>Contents: Read and write</b><br>
+      5. Generate token → 表示された <b>github_pat_...</b> をコピーして上に貼り付け<br>
+      ※ トークンはこの端末（ブラウザ）内にのみ保存されます。
+    </div>
+    <button class="primary" id="btnSave">保存して開始</button>
+  </section>
+
+  <!-- 評価 -->
+  <section id="review" class="screen">
+    <div id="progress"></div>
+    <div id="cardArea" style="flex:1;display:flex;flex-direction:column;min-height:0"></div>
+  </section>
+
+  <!-- 一覧 -->
+  <section id="list" class="screen">
+    <div id="summary"></div>
+    <div id="rows"></div>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* ============================================================
+   ニュース評価アプリ（GitHub Contents API 直結・単一ファイル）
+   - 設定/トークンは localStorage（この端末のみ）
+   - 評価は pending に貯め、自動で reviews/<profile>/reviews.json へ同期
+   - #demo=1 でダミーデータ動作（API 不要）
+   ============================================================ */
+
+const LS_SETTINGS = "nt_settings";
+const API = "https://api.github.com";
+const VERDICTS = ["採用", "候補", "不採用"];
+
+let settings = null;      // {owner, repo, profile, token}
+let demo = false;
+let queue = [];           // 未評価 items
+let queueIdx = 0;
+let reviews = {};         // 同期済み {id: {verdict, at, title, url}}
+let reviewsSha = null;    // reviews.json の sha（PUT 用）
+let pending = {};         // 未同期 {id: {...}}
+let undoStack = [];       // [{item, id}]
+let syncTimer = null;
+let syncing = false;
+
+/* ---------- 小道具 ---------- */
+const $ = (id) => document.getElementById(id);
+function toast(msg, ms = 2200) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast._h); toast._h = setTimeout(() => t.classList.remove("show"), ms);
+}
+function b64decodeUtf8(b64) {
+  const bin = atob(b64.replace(/\n/g, ""));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder("utf-8").decode(bytes);
+}
+function b64encodeUtf8(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000)
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function nowIso() {
+  // JST 表記（端末ローカル時刻に +09:00 想定でなく、端末TZのオフセットをそのまま付与）
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const off = -d.getTimezoneOffset();
+  const sign = off >= 0 ? "+" : "-";
+  const oh = pad(Math.floor(Math.abs(off) / 60)), om = pad(Math.abs(off) % 60);
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}${sign}${oh}:${om}`;
+}
+function pendingKey() { return `nt_pending_${settings ? settings.profile : "demo"}`; }
+function loadPending() { try { pending = JSON.parse(localStorage.getItem(pendingKey())) || {}; } catch { pending = {}; } }
+function savePending() { localStorage.setItem(pendingKey(), JSON.stringify(pending)); }
+
+/* ---------- GitHub API ---------- */
+async function gh(path, opts = {}) {
+  const res = await fetch(`${API}${path}`, {
+    ...opts,
+    headers: {
+      "Authorization": `Bearer ${settings.token}`,
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(opts.headers || {}),
+    },
+  });
+  if (res.status === 404) return { notFound: true };
+  if (res.status === 401) throw new Error("トークンが無効です（設定を確認してください）");
+  if (res.status === 403) throw new Error("アクセスが拒否されました（トークンの権限を確認してください）");
+  if (!res.ok) throw new Error(`GitHub API エラー (${res.status})`);
+  return res.json();
+}
+const contentsPath = (p) => `/repos/${settings.owner}/${settings.repo}/contents/${p}`;
+
+async function fetchNewsItems() {
+  const dir = await gh(contentsPath(`data/${settings.profile}`));
+  if (dir.notFound) throw new Error(`data/${settings.profile} が見つかりません（設定を確認してください）`);
+  const files = dir.filter(f => /^news_\d{8}\.json$/.test(f.name)).sort((a, b) => b.name.localeCompare(a.name)).slice(0, 4);
+  const byId = {};
+  for (const f of files.reverse()) {  // 古い→新しい順に読み、新しい方で上書き
+    const file = await gh(contentsPath(`data/${settings.profile}/${f.name}`));
+    if (file.notFound || !file.content) continue;
+    const data = JSON.parse(b64decodeUtf8(file.content));
+    for (const item of data.items || []) byId[item.id] = item;
+  }
+  return Object.values(byId);
+}
+async function fetchReviews() {
+  const file = await gh(contentsPath(`reviews/${settings.profile}/reviews.json`));
+  if (file.notFound) { reviews = {}; reviewsSha = null; return; }
+  reviews = JSON.parse(b64decodeUtf8(file.content));
+  reviewsSha = file.sha;
+}
+async function pushReviews() {
+  if (syncing || demo) return;
+  const ids = Object.keys(pending);
+  if (ids.length === 0) { updateSyncState(); return; }
+  syncing = true; updateSyncState("同期中…");
+  try {
+    // 最新を取得してマージ（他端末との競合にも耐える）
+    await fetchReviews();
+    const merged = { ...reviews, ...pending };
+    const body = {
+      message: `review(${settings.profile}): ${ids.length}件の評価を更新`,
+      content: b64encodeUtf8(JSON.stringify(merged, null, 2)),
+    };
+    if (reviewsSha) body.sha = reviewsSha;
+    const res = await gh(contentsPath(`reviews/${settings.profile}/reviews.json`), {
+      method: "PUT", body: JSON.stringify(body),
+    });
+    if (res.content) {
+      reviews = merged; reviewsSha = res.content.sha;
+      for (const id of ids) delete pending[id];
+      savePending();
+      toast(`✓ ${ids.length}件を同期しました`);
+    }
+  } catch (e) {
+    toast(`同期失敗: ${e.message}（後で自動再試行します）`, 3000);
+  } finally {
+    syncing = false; updateSyncState();
+  }
+}
+function scheduleSync(delay = 2500) {
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(pushReviews, delay);
+  updateSyncState();
+}
+
+/* ---------- 画面制御 ---------- */
+function show(name) {
+  for (const s of document.querySelectorAll(".screen")) s.classList.remove("active");
+  $(name).classList.add("active");
+}
+function updateSyncState(msg) {
+  const n = Object.keys(pending).length;
+  $("syncState").textContent = msg || (demo ? "デモ" : (n ? `未同期 ${n}件` : "同期済 ✓"));
+}
+
+function renderCard() {
+  const area = $("cardArea");
+  const remaining = queue.length - queueIdx;
+  if (remaining <= 0) {
+    $("progress").textContent = "";
+    area.innerHTML = `<div class="done-box"><div class="big">🎉</div>すべて評価済みです<br>
+      <small>新しい記事は毎週土曜の収集後に増えます</small></div>`;
+    pushReviews();
+    return;
+  }
+  const item = queue[queueIdx];
+  $("progress").textContent = `${queueIdx + 1} / ${queue.length} 件`;
+  area.innerHTML = `
+    <div class="card">
+      <div class="meta">${item.date}｜${item.media_name}</div>
+      <h2>${escapeHtml(item.title)}</h2>
+      <div class="body">${escapeHtml(item.body_excerpt || "（本文抜粋なし）")}</div>
+      <div class="srclink"><a href="${encodeURI(item.url)}" target="_blank" rel="noopener">元記事を開く ↗</a></div>
+      <div class="verdicts">
+        <button class="adopt">採用</button>
+        <button class="maybe">候補</button>
+        <button class="reject">不採用</button>
+      </div>
+      <div class="subactions"><button id="btnUndo" ${undoStack.length ? "" : "disabled"}>← ひとつ戻す</button></div>
+    </div>`;
+  area.querySelector(".adopt").onclick = () => rate("採用");
+  area.querySelector(".maybe").onclick = () => rate("候補");
+  area.querySelector(".reject").onclick = () => rate("不採用");
+  area.querySelector("#btnUndo").onclick = undo;
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+function rate(verdict) {
+  const item = queue[queueIdx];
+  pending[item.id] = { verdict, at: nowIso(), title: item.title, url: item.url };
+  savePending();
+  undoStack.push({ idx: queueIdx, id: item.id });
+  queueIdx++;
+  scheduleSync();
+  renderCard();
+}
+function undo() {
+  const last = undoStack.pop();
+  if (!last) return;
+  delete pending[last.id];
+  savePending();
+  queueIdx = last.idx;
+  scheduleSync();
+  renderCard();
+}
+
+function renderList() {
+  const all = { ...reviews, ...pending };
+  const counts = { "採用": 0, "候補": 0, "不採用": 0 };
+  const entries = Object.entries(all).sort((a, b) => (b[1].at || "").localeCompare(a[1].at || ""));
+  for (const [, r] of entries) if (counts[r.verdict] !== undefined) counts[r.verdict]++;
+  $("summary").innerHTML = VERDICTS.map(v => `<div class="chip">${v}<b>${counts[v]}</b></div>`).join("");
+  $("rows").innerHTML = entries.map(([id, r]) => `
+    <div class="rowitem" data-id="${id}">
+      <button class="v ${r.verdict}">${r.verdict}</button>
+      <div class="t">${escapeHtml(r.title || id)}<small>${(r.at || "").slice(0, 10)}${id in pending ? "・未同期" : ""}</small></div>
+    </div>`).join("") || `<div class="spinner">まだ評価がありません</div>`;
+  for (const btn of $("rows").querySelectorAll(".v")) {
+    btn.onclick = (e) => {
+      const row = e.target.closest(".rowitem");
+      const id = row.dataset.id;
+      const cur = (pending[id] || reviews[id]);
+      const next = VERDICTS[(VERDICTS.indexOf(cur.verdict) + 1) % VERDICTS.length];
+      pending[id] = { ...cur, verdict: next, at: nowIso() };
+      savePending();
+      scheduleSync();
+      renderList();
+    };
+  }
+}
+
+/* ---------- 起動 ---------- */
+function parseHash() {
+  const h = {};
+  for (const kv of location.hash.replace(/^#/, "").split("&")) {
+    const [k, v] = kv.split("=");
+    if (k) h[decodeURIComponent(k)] = decodeURIComponent(v || "");
+  }
+  return h;
+}
+function demoItems() {
+  return [
+    { id: "demo01", date: "2026-07-01", media_name: "デモニュース", url: "https://example.com/1",
+      title: "【デモ】架空フーズ、新業態「うどん例文亭」を出店",
+      body_excerpt: "これはデモ記事です。架空フーズ株式会社（実在しません）は、新業態のうどん店を出店する。仮のテキストが続きます。".repeat(5) },
+    { id: "demo02", date: "2026-07-02", media_name: "デモニュース", url: "https://example.com/2",
+      title: "【デモ】大手チェーン、夏の新メニュー4種を発表",
+      body_excerpt: "これはデモ記事その2です。冷やし麺のラインナップが今年も登場。".repeat(8) },
+    { id: "demo03", date: "2026-07-03", media_name: "デモ業界紙", url: "https://example.com/3",
+      title: "【デモ】外食売上、6月は前年比105%で着地",
+      body_excerpt: "これはデモ記事その3です。月次データのまとめ。".repeat(10) },
+  ];
+}
+async function start() {
+  loadPending();
+  updateSyncState();
+  show("review");
+  $("cardArea").innerHTML = `<div class="spinner">記事を読み込み中…</div>`;
+  try {
+    let items;
+    if (demo) {
+      items = demoItems();
+      reviews = {};
+    } else {
+      await fetchReviews();
+      items = await fetchNewsItems();
+    }
+    const rated = new Set([...Object.keys(reviews), ...Object.keys(pending)]);
+    queue = items.filter(i => !rated.has(i.id))
+                 .sort((a, b) => a.date.localeCompare(b.date) || a.media_name.localeCompare(b.media_name));
+    queueIdx = 0;
+    undoStack = [];
+    renderCard();
+    if (!demo && Object.keys(pending).length) scheduleSync(1000);
+  } catch (e) {
+    $("cardArea").innerHTML = `<div class="spinner">⚠ ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function init() {
+  const hash = parseHash();
+  demo = hash.demo === "1";
+  if (demo) {
+    $("banner").style.display = "block";
+    $("banner").textContent = "デモモード（評価は保存されません）";
+    settings = { owner: "", repo: "", profile: "demo", token: "" };
+    start();
+  } else {
+    try { settings = JSON.parse(localStorage.getItem(LS_SETTINGS)); } catch { settings = null; }
+    // URL ハッシュで owner/repo/profile を事前充填（PAT は充填しない）
+    if (hash.owner) $("inOwner").value = hash.owner;
+    if (hash.repo) $("inRepo").value = hash.repo;
+    if (hash.profile) $("inProfile").value = hash.profile;
+    if (settings && settings.token) {
+      $("inOwner").value = settings.owner; $("inRepo").value = settings.repo;
+      $("inProfile").value = settings.profile; $("inToken").value = settings.token;
+      start();
+    } else {
+      show("setup");
+    }
+  }
+  $("navReview").onclick = () => { show("review"); };
+  $("navList").onclick = () => { renderList(); show("list"); };
+  $("navSetup").onclick = () => { show("setup"); };
+  $("btnSave").onclick = () => {
+    const s = {
+      owner: $("inOwner").value.trim(), repo: $("inRepo").value.trim(),
+      profile: $("inProfile").value.trim(), token: $("inToken").value.trim(),
+    };
+    if (!s.owner || !s.repo || !s.profile || !s.token) { toast("4項目すべて入力してください"); return; }
+    settings = s;
+    localStorage.setItem(LS_SETTINGS, JSON.stringify(s));
+    toast("保存しました");
+    start();
+  };
+  // ハッシュ変更（#demo=1 の付け外し等）は再読込して init からやり直す
+  window.addEventListener("hashchange", () => location.reload());
+  // 画面復帰・オンライン復帰時に未同期分を送る
+  window.addEventListener("online", () => scheduleSync(500));
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && Object.keys(pending).length) scheduleSync(500);
+  });
+}
+init();
+</script>
+</body>
+</html>
