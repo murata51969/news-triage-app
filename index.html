@@ -70,8 +70,18 @@
     flex: 1; overflow-y: auto; font-size: 14px; line-height: 1.8; color: var(--text);
     -webkit-overflow-scrolling: touch; padding-bottom: 8px; min-height: 0;
   }
-  .card .srclink { margin-top: 8px; }
-  .card .srclink a { font-size: 13px; color: var(--accent); text-decoration: none; }
+  .card .srclink { margin-top: 12px; }
+  .card .srclink a {
+    display: block; text-align: center; padding: 13px 0; font-size: 14px; font-weight: 600;
+    color: var(--accent); text-decoration: none;
+    border: 1.5px solid var(--accent); border-radius: 12px;
+  }
+  .notebox { margin-top: 10px; }
+  .notebox textarea {
+    width: 100%; padding: 10px 12px; font-size: 16px; line-height: 1.5;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: var(--bg); color: var(--text); resize: none; font-family: inherit;
+  }
   .verdicts { display: flex; gap: 8px; margin-top: 12px; }
   .verdicts button {
     flex: 1; padding: 16px 0; font-size: 16px; font-weight: 700; color: #fff;
@@ -107,6 +117,7 @@
   .rowitem .v.不採用 { background: var(--reject); }
   .rowitem .t { font-size: 13px; line-height: 1.5; flex: 1; }
   .rowitem .t small { color: var(--sub); display: block; font-size: 11px; }
+  .rowitem .t small.note { color: var(--accent); }
 
   #banner {
     display: none; text-align: center; font-size: 12px; padding: 6px;
@@ -329,6 +340,8 @@ function renderCard() {
       <h2>${escapeHtml(item.title)}</h2>
       <div class="body">${escapeHtml(item.body_excerpt || "（本文抜粋なし）")}</div>
       <div class="srclink"><a href="${encodeURI(item.url)}" target="_blank" rel="noopener">元記事を開く ↗</a></div>
+      <div class="notebox"><textarea id="noteInput" rows="2"
+        placeholder="メモ（任意）：採用/不採用の理由・判断基準など"></textarea></div>
       <div class="verdicts">
         <button class="adopt">採用</button>
         <button class="maybe">候補</button>
@@ -346,7 +359,11 @@ function escapeHtml(s) {
 }
 function rate(verdict) {
   const item = queue[queueIdx];
-  pending[item.id] = { verdict, at: nowIso(), title: item.title, url: item.url };
+  const noteEl = $("noteInput");
+  const note = noteEl ? noteEl.value.trim() : "";
+  const rec = { verdict, at: nowIso(), title: item.title, url: item.url };
+  if (note) rec.note = note;  // 判断基準・理由の蓄積（下流の選定基準改善に使う）
+  pending[item.id] = rec;
   savePending();
   undoStack.push({ idx: queueIdx, id: item.id });
   queueIdx++;
@@ -356,11 +373,13 @@ function rate(verdict) {
 function undo() {
   const last = undoStack.pop();
   if (!last) return;
+  const prev = pending[last.id];
   delete pending[last.id];
   savePending();
   queueIdx = last.idx;
   scheduleSync();
   renderCard();
+  if (prev && prev.note && $("noteInput")) $("noteInput").value = prev.note;
 }
 
 function renderList() {
@@ -372,7 +391,7 @@ function renderList() {
   $("rows").innerHTML = entries.map(([id, r]) => `
     <div class="rowitem" data-id="${id}">
       <button class="v ${r.verdict}">${r.verdict}</button>
-      <div class="t">${escapeHtml(r.title || id)}<small>${(r.at || "").slice(0, 10)}${id in pending ? "・未同期" : ""}</small></div>
+      <div class="t">${escapeHtml(r.title || id)}<small>${(r.at || "").slice(0, 10)}${id in pending ? "・未同期" : ""}</small>${r.note ? `<small class="note">✎ ${escapeHtml(r.note)}</small>` : ""}</div>
     </div>`).join("") || `<div class="spinner">まだ評価がありません</div>`;
   for (const btn of $("rows").querySelectorAll(".v")) {
     btn.onclick = (e) => {
@@ -381,6 +400,21 @@ function renderList() {
       const cur = (pending[id] || reviews[id]);
       const next = VERDICTS[(VERDICTS.indexOf(cur.verdict) + 1) % VERDICTS.length];
       pending[id] = { ...cur, verdict: next, at: nowIso() };
+      savePending();
+      scheduleSync();
+      renderList();
+    };
+  }
+  // タイトル部分のタップでメモを追記・編集
+  for (const t of $("rows").querySelectorAll(".t")) {
+    t.onclick = (e) => {
+      const id = e.target.closest(".rowitem").dataset.id;
+      const cur = (pending[id] || reviews[id]);
+      const input = window.prompt("メモ（判断基準・理由など）", cur.note || "");
+      if (input === null) return;
+      const rec = { ...cur, at: nowIso() };
+      if (input.trim()) rec.note = input.trim(); else delete rec.note;
+      pending[id] = rec;
       savePending();
       scheduleSync();
       renderList();
