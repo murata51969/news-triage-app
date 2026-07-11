@@ -87,6 +87,13 @@
     color: var(--accent); text-decoration: none;
     border: 1.5px solid var(--accent); border-radius: 12px;
   }
+  .tagbox { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .tagchip {
+    padding: 7px 12px; font-size: 13px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--card); color: var(--sub);
+    touch-action: manipulation;
+  }
+  .tagchip.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   .notebox { margin-top: 10px; }
   .notebox textarea {
     width: 100%; padding: 10px 12px; font-size: 16px; line-height: 1.5;
@@ -128,6 +135,7 @@
   .rowitem .t { font-size: 13px; line-height: 1.5; flex: 1; }
   .rowitem .t small { color: var(--sub); display: block; font-size: 11px; }
   .rowitem .t small.note { color: var(--accent); }
+  .rowitem .t small.tags { color: var(--sub); }
 
   #banner {
     display: none; text-align: center; font-size: 12px; padding: 6px;
@@ -209,6 +217,7 @@ const VLABEL = { "採用": "○ 採用", "不採用": "× 不採用", "候補": 
 
 let settings = null;      // {owner, repo, profile, token}
 let demo = false;
+let tagOptions = [];      // reviews/<profile>/tags.json のタグ選択肢
 let queue = [];           // 未評価 items
 let queueIdx = 0;
 let reviews = {};         // 同期済み {id: {verdict, at, title, url}}
@@ -288,6 +297,15 @@ async function fetchReviews() {
   reviews = JSON.parse(b64decodeUtf8(file.content));
   reviewsSha = file.sha;
 }
+async function fetchTags() {
+  // タグ選択肢はリポ側 reviews/<profile>/tags.json で管理（無ければタグUI非表示）
+  const file = await gh(contentsPath(`reviews/${settings.profile}/tags.json`));
+  if (file.notFound || !file.content) return [];
+  try {
+    const arr = JSON.parse(b64decodeUtf8(file.content));
+    return Array.isArray(arr) ? arr.filter(t => typeof t === "string" && t) : [];
+  } catch { return []; }
+}
 async function pushReviews() {
   if (syncing || demo) return;
   const ids = Object.keys(pending);
@@ -355,6 +373,8 @@ function renderCard() {
       <button class="toggleBody">▼ 続きを読む</button>
       <div class="spacer"></div>
       <div class="srclink"><a href="${encodeURI(item.url)}" target="_blank" rel="noopener">元記事を開く ↗</a></div>
+      ${tagOptions.length ? `<div class="tagbox">${tagOptions.map(t =>
+        `<button class="tagchip">${escapeHtml(t)}</button>`).join("")}</div>` : ""}
       <div class="notebox"><textarea id="noteInput" rows="2"
         placeholder="メモ（任意）：採用/不採用の理由・判断基準など"></textarea></div>
       <div class="verdicts">
@@ -366,6 +386,8 @@ function renderCard() {
   area.querySelector(".adopt").onclick = () => rate("採用");
   area.querySelector(".reject").onclick = () => rate("不採用");
   area.querySelector("#btnUndo").onclick = undo;
+  for (const chip of area.querySelectorAll(".tagchip"))
+    chip.onclick = () => chip.classList.toggle("on");
   // 本文が8行に収まる場合は「続きを読む」を出さない。超える場合は折り畳み＋トグル
   const bodyEl = area.querySelector(".body");
   const toggleEl = area.querySelector(".toggleBody");
@@ -388,6 +410,8 @@ function rate(verdict) {
   const note = noteEl ? noteEl.value.trim() : "";
   const rec = { verdict, at: nowIso(), title: item.title, url: item.url };
   if (note) rec.note = note;  // 判断基準・理由の蓄積（下流の選定基準改善に使う）
+  const tags = [...document.querySelectorAll(".card .tagchip.on")].map(c => c.textContent);
+  if (tags.length) rec.tags = tags;
   pending[item.id] = rec;
   savePending();
   undoStack.push({ idx: queueIdx, id: item.id });
@@ -405,6 +429,9 @@ function undo() {
   scheduleSync();
   renderCard();
   if (prev && prev.note && $("noteInput")) $("noteInput").value = prev.note;
+  if (prev && prev.tags)
+    for (const chip of document.querySelectorAll(".card .tagchip"))
+      if (prev.tags.includes(chip.textContent)) chip.classList.add("on");
 }
 
 function renderList() {
@@ -418,7 +445,7 @@ function renderList() {
   $("rows").innerHTML = entries.map(([id, r]) => `
     <div class="rowitem" data-id="${id}">
       <button class="v ${r.verdict}">${VLABEL[r.verdict] || r.verdict}</button>
-      <div class="t">${escapeHtml(r.title || id)}<small>${(r.at || "").slice(0, 10)}${id in pending ? "・未同期" : ""}</small>${r.note ? `<small class="note">✎ ${escapeHtml(r.note)}</small>` : ""}</div>
+      <div class="t">${escapeHtml(r.title || id)}<small>${(r.at || "").slice(0, 10)}${id in pending ? "・未同期" : ""}</small>${(r.tags && r.tags.length) ? `<small class="tags">🏷 ${r.tags.map(escapeHtml).join("・")}</small>` : ""}${r.note ? `<small class="note">✎ ${escapeHtml(r.note)}</small>` : ""}</div>
     </div>`).join("") || `<div class="spinner">まだ評価がありません</div>`;
   for (const btn of $("rows").querySelectorAll(".v")) {
     btn.onclick = (e) => {
@@ -481,8 +508,10 @@ async function start() {
     if (demo) {
       items = demoItems();
       reviews = {};
+      tagOptions = ["タグA", "タグB", "タグC"];
     } else {
       await fetchReviews();
+      tagOptions = await fetchTags();
       items = await fetchNewsItems();
     }
     const rated = new Set([...Object.keys(reviews), ...Object.keys(pending)]);
