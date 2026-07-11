@@ -239,6 +239,7 @@ let settings = null;      // {owner, repo, profile, token}
 let demo = false;
 let tagOptions = { gyotai: [], tags: [] };  // reviews/<profile>/tags.json（業態/タグの2区分）
 let newTags = { gyotai: [], tags: [] };     // 自由入力で追加され tags.json 未反映のもの
+let allItems = {};        // 読込済み全記事 id→item（一覧からの評価修正で本文表示に使う）
 let queue = [];           // 未評価 items
 let queueIdx = 0;
 let reviews = {};         // 同期済み {id: {verdict, at, title, url}}
@@ -452,19 +453,8 @@ function addTagChip(grp, group, value) {
     scheduleSync();  // tags.json への書き戻しも同期に乗せる
   }
 }
-function renderCard() {
-  const area = $("cardArea");
-  const remaining = queue.length - queueIdx;
-  if (remaining <= 0) {
-    $("progress").textContent = "";
-    area.innerHTML = `<div class="done-box"><div class="big">🎉</div>すべて評価済みです<br>
-      <small>新しい記事は毎週土曜の収集後に増えます</small></div>`;
-    pushReviews();
-    return;
-  }
-  const item = queue[queueIdx];
-  $("progress").textContent = `${queueIdx + 1} / ${queue.length} 件`;
-  area.innerHTML = `
+function cardHtml(item, subLabel, subDisabled) {
+  return `
     <div class="card">
       <div class="meta">${item.date}｜${item.media_name}</div>
       <h2>${escapeHtml(item.title)}</h2>
@@ -480,11 +470,11 @@ function renderCard() {
         <button class="adopt">○ 採用</button>
         <button class="reject">× 不採用</button>
       </div>
-      <div class="subactions"><button id="btnUndo" ${undoStack.length ? "" : "disabled"}>← ひとつ戻す</button></div>
+      <div class="subactions"><button id="btnSub"${subDisabled ? " disabled" : ""}>${subLabel}</button></div>
     </div>`;
-  area.querySelector(".adopt").onclick = () => rate("採用");
-  area.querySelector(".reject").onclick = () => rate("不採用");
-  area.querySelector("#btnUndo").onclick = undo;
+}
+function wireCardCommon(area) {
+  // タググループ（チップ選択・＋自由入力）と本文折り畳みの共通配線
   for (const grp of area.querySelectorAll(".taggroup")) {
     const group = grp.dataset.group;
     for (const chip of grp.querySelectorAll(".tagchip"))
@@ -512,6 +502,70 @@ function renderCard() {
       toggleEl.textContent = expanded ? "▲ たたむ" : "▼ 続きを読む";
     };
   }
+}
+function pickTags(area, group) {
+  return [...area.querySelectorAll(`.taggroup[data-group="${group}"] .tagchip.on`)].map(c => c.textContent);
+}
+function markTags(area, rec) {
+  for (const [g, arr] of [["gyotai", rec.gyotai], ["tags", rec.tags]])
+    if (arr)
+      for (const chip of area.querySelectorAll(`.taggroup[data-group="${g}"] .tagchip`))
+        if (arr.includes(chip.textContent)) chip.classList.add("on");
+}
+function renderCard() {
+  const area = $("cardArea");
+  const remaining = queue.length - queueIdx;
+  if (remaining <= 0) {
+    $("progress").textContent = "";
+    area.innerHTML = `<div class="done-box"><div class="big">🎉</div>すべて評価済みです<br>
+      <small>新しい記事は毎週土曜の収集後に増えます。<br>評価の修正は「一覧」から記事をタップ</small></div>`;
+    pushReviews();
+    return;
+  }
+  const item = queue[queueIdx];
+  $("progress").textContent = `${queueIdx + 1} / ${queue.length} 件`;
+  area.innerHTML = cardHtml(item, "← ひとつ戻す", !undoStack.length);
+  area.querySelector(".adopt").onclick = () => rate("採用");
+  area.querySelector(".reject").onclick = () => rate("不採用");
+  area.querySelector("#btnSub").onclick = undo;
+  wireCardCommon(area);
+}
+function renderReviewEdit(id) {
+  // 一覧から開く「評価の修正」画面。既存の評価内容を事前充填して同じカードUIで編集する
+  const rec = pending[id] || reviews[id];
+  if (!rec) return;
+  const item = allItems[id] || {
+    id, date: (rec.at || "").slice(0, 10), title: rec.title || id,
+    media_name: "過去記事（本文データなし）", url: rec.url || "", body_excerpt: "",
+  };
+  const area = $("cardArea");
+  $("progress").textContent = `評価の修正（現在: ${VLABEL[rec.verdict] || rec.verdict}）`;
+  area.innerHTML = cardHtml(item, "一覧に戻る（変更しない）", false);
+  $("noteInput").value = rec.note || "";
+  markTags(area, rec);
+  wireCardCommon(area);
+  const save = (verdict) => {
+    const rec2 = { verdict, at: nowIso(), title: item.title, url: item.url };
+    const note = $("noteInput").value.trim();
+    if (note) rec2.note = note;
+    const gyotai = pickTags(area, "gyotai"), tags = pickTags(area, "tags");
+    if (gyotai.length) rec2.gyotai = gyotai;
+    if (tags.length) rec2.tags = tags;
+    pending[id] = rec2;
+    savePending();
+    scheduleSync();
+    toast("更新しました");
+    backToList();
+  };
+  area.querySelector(".adopt").onclick = () => save("採用");
+  area.querySelector(".reject").onclick = () => save("不採用");
+  area.querySelector("#btnSub").onclick = backToList;
+  show("review");
+}
+function backToList() {
+  renderCard();   // 評価タブを未評価キューの表示に戻す
+  renderList();
+  show("list");
 }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
@@ -576,19 +630,11 @@ function renderList() {
       renderList();
     };
   }
-  // タイトル部分のタップでメモを追記・編集
+  // タイトル部分のタップで評価画面（修正モード）を開く
   for (const t of $("rows").querySelectorAll(".t")) {
     t.onclick = (e) => {
       const id = e.target.closest(".rowitem").dataset.id;
-      const cur = (pending[id] || reviews[id]);
-      const input = window.prompt("メモ（判断基準・理由など）", cur.note || "");
-      if (input === null) return;
-      const rec = { ...cur, at: nowIso() };
-      if (input.trim()) rec.note = input.trim(); else delete rec.note;
-      pending[id] = rec;
-      savePending();
-      scheduleSync();
-      renderList();
+      renderReviewEdit(id);
     };
   }
 }
@@ -632,6 +678,8 @@ async function start() {
       tagOptions = await fetchTags();
       items = await fetchNewsItems();
     }
+    allItems = {};
+    for (const i of items) allItems[i.id] = i;
     const rated = new Set([...Object.keys(reviews), ...Object.keys(pending)]);
     queue = items.filter(i => !rated.has(i.id))
                  .sort((a, b) => a.date.localeCompare(b.date) || a.media_name.localeCompare(b.media_name));
