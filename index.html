@@ -99,20 +99,28 @@
     flex-shrink: 0; font-size: 11px; color: var(--sub); padding: 8px 0;
     width: 34px;
   }
-  .tagbox { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+  /* タグは1行固定・横スクロール（並び順は tags.json の記載順） */
+  .tagbox {
+    display: flex; flex-wrap: nowrap; gap: 6px; flex: 1;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+    scrollbar-width: none; padding-bottom: 2px;
+  }
+  .tagbox::-webkit-scrollbar { display: none; }
   .tagchip {
-    padding: 7px 12px; font-size: 13px; border-radius: 999px;
+    padding: 7px 12px; font-size: 13px; border-radius: 999px; white-space: nowrap;
     border: 1px solid var(--line); background: var(--card); color: var(--sub);
-    touch-action: manipulation;
+    touch-action: manipulation; flex-shrink: 0;
   }
   .tagchip.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   .tagadd {
     padding: 7px 12px; font-size: 13px; border-radius: 999px;
     border: 1px dashed var(--sub); background: transparent; color: var(--sub);
+    flex-shrink: 0;
   }
   .taginput {
     padding: 7px 12px; font-size: 16px; border-radius: 999px; width: 10em;
     border: 1px solid var(--accent); background: var(--bg); color: var(--text);
+    flex-shrink: 0;
   }
   .notebox { margin-top: 10px; }
   .notebox textarea {
@@ -234,12 +242,15 @@ const LS_SETTINGS = "nt_settings";
 const API = "https://api.github.com";
 const VERDICTS = ["採用", "不採用"];              // ○ / × の2択（保存値は従来互換）
 const VLABEL = { "採用": "○ 採用", "不採用": "× 不採用", "候補": "候補" };  // 候補=旧データ表示用
+const SYNC_MIN_INTERVAL = 30 * 60 * 1000;         // 自動同期は30分に1回まで（コミット削減）
 
 let settings = null;      // {owner, repo, profile, token}
 let demo = false;
 let tagOptions = { gyotai: [], tags: [] };  // reviews/<profile>/tags.json（業態/タグの2区分）
 let newTags = { gyotai: [], tags: [] };     // 自由入力で追加され tags.json 未反映のもの
 let allItems = {};        // 読込済み全記事 id→item（一覧からの評価修正で本文表示に使う）
+let queueViewStale = false;  // 一覧の修正画面を開いた後、評価タブを再描画するためのフラグ
+let defaultBranch = null;    // Git Data API 用（初回取得後キャッシュ）
 let queue = [];           // 未評価 items
 let queueIdx = 0;
 let reviews = {};         // 同期済み {id: {verdict, at, title, url}}
@@ -286,6 +297,9 @@ function loadNewTags() {
   catch { newTags = { gyotai: [], tags: [] }; }
 }
 function saveNewTags() { localStorage.setItem(newTagsKey(), JSON.stringify(newTags)); }
+function lastSyncKey() { return `nt_lastsync_${settings ? settings.profile : "demo"}`; }
+function getLastSyncAt() { return Number(localStorage.getItem(lastSyncKey())) || 0; }
+function setLastSyncAt(t) { localStorage.setItem(lastSyncKey(), String(t)); }
 
 /* ---------- GitHub API ---------- */
 async function gh(path, opts = {}) {
@@ -340,57 +354,88 @@ async function fetchTags() {
   try { return normalizeTagData(JSON.parse(b64decodeUtf8(file.content))); }
   catch { return { gyotai: [], tags: [] }; }
 }
-async function pushNewTags() {
-  // 自由入力で追加されたタグを tags.json に書き戻す（次回からチップ表示される）
-  if (demo || (!newTags.gyotai.length && !newTags.tags.length)) return;
-  try {
-    const file = await gh(contentsPath(`reviews/${settings.profile}/tags.json`));
-    const remote = (file.notFound || !file.content)
-      ? { gyotai: [], tags: [] } : normalizeTagData(JSON.parse(b64decodeUtf8(file.content)));
-    const merged = {
-      "業態": [...new Set([...remote.gyotai, ...newTags.gyotai])],
-      "タグ": [...new Set([...remote.tags, ...newTags.tags])],
-    };
-    const body = {
-      message: `review(${settings.profile}): タグ一覧を更新`,
-      content: b64encodeUtf8(JSON.stringify(merged, null, 2)),
-    };
-    if (!file.notFound && file.sha) body.sha = file.sha;
-    const res = await gh(contentsPath(`reviews/${settings.profile}/tags.json`), {
-      method: "PUT", body: JSON.stringify(body),
-    });
-    if (res.content) {
-      tagOptions = { gyotai: merged["業態"], tags: merged["タグ"] };
-      newTags = { gyotai: [], tags: [] };
-      saveNewTags();
-    }
-  } catch { /* 失敗しても newTags はローカルに残り次回再試行 */ }
+async function getDefaultBranch() {
+  if (defaultBranch) return defaultBranch;
+  const repo = await gh(`/repos/${settings.owner}/${settings.repo}`);
+  defaultBranch = repo.default_branch || "main";
+  return defaultBranch;
 }
-async function pushReviews() {
+async function commitFiles(files, message) {
+  // 複数ファイルを1コミットで反映する（Git Data API）。
+  // Contents API の PUT は1ファイル=1コミットのため、評価とタグ一覧の更新が
+  // 別コミットに分かれて履歴が膨らむ。ここで tree にまとめて1コミットにする。
+  // files: [{path, content(文字列)}]
+  const br = await getDefaultBranch();
+  const base = `/repos/${settings.owner}/${settings.repo}`;
+  const ref = await gh(`${base}/git/ref/heads/${br}`);
+  const parentSha = ref.object.sha;
+  const parent = await gh(`${base}/git/commits/${parentSha}`);
+  const tree = await gh(`${base}/git/trees`, {
+    method: "POST",
+    body: JSON.stringify({
+      base_tree: parent.tree.sha,
+      tree: files.map(f => ({ path: f.path, mode: "100644", type: "blob", content: f.content })),
+    }),
+  });
+  const commit = await gh(`${base}/git/commits`, {
+    method: "POST",
+    body: JSON.stringify({ message, tree: tree.sha, parents: [parentSha] }),
+  });
+  return gh(`${base}/git/refs/heads/${br}`, {
+    method: "PATCH",
+    body: JSON.stringify({ sha: commit.sha }),
+  });
+}
+async function pushReviews(force = false) {
   if (syncing || demo) return;
   const ids = Object.keys(pending);
   const hasNewTags = newTags.gyotai.length || newTags.tags.length;
   if (ids.length === 0 && !hasNewTags) { updateSyncState(); return; }
+  // 自動同期は30分に1回まで（コミット削減）。全件評価完了時と
+  // ヘッダーの「未同期」タップだけ force=true で即時送信する。
+  const wait = getLastSyncAt() + SYNC_MIN_INTERVAL - Date.now();
+  if (!force && wait > 0) { scheduleSync(wait); return; }
   syncing = true; updateSyncState("同期中…");
   try {
-    await pushNewTags();
-    if (ids.length === 0) return;
-    // 最新を取得してマージ（他端末との競合にも耐える）
-    await fetchReviews();
-    const merged = { ...reviews, ...pending };
-    const body = {
-      message: `review(${settings.profile}): ${ids.length}件の評価を更新`,
-      content: b64encodeUtf8(JSON.stringify(merged, null, 2)),
-    };
-    if (reviewsSha) body.sha = reviewsSha;
-    const res = await gh(contentsPath(`reviews/${settings.profile}/reviews.json`), {
-      method: "PUT", body: JSON.stringify(body),
-    });
-    if (res.content) {
-      reviews = merged; reviewsSha = res.content.sha;
-      for (const id of ids) delete pending[id];
-      savePending();
-      toast(`✓ ${ids.length}件を同期しました`);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        // 最新を取得してマージ（他端末との競合にも耐える）
+        await fetchReviews();
+        const mergedReviews = { ...reviews, ...pending };
+        const files = [{
+          path: `reviews/${settings.profile}/reviews.json`,
+          content: JSON.stringify(mergedReviews, null, 2),
+        }];
+        let mergedTags = null;
+        if (hasNewTags) {
+          const remote = await fetchTags();
+          mergedTags = {
+            "業態": [...new Set([...remote.gyotai, ...newTags.gyotai])],
+            "タグ": [...new Set([...remote.tags, ...newTags.tags])],
+          };
+          files.push({
+            path: `reviews/${settings.profile}/tags.json`,
+            content: JSON.stringify(mergedTags, null, 2),
+          });
+        }
+        const parts = [];
+        if (ids.length) parts.push(`${ids.length}件の評価を更新`);
+        if (hasNewTags) parts.push("タグ一覧を更新");
+        await commitFiles(files, `review(${settings.profile}): ${parts.join("・")}`);
+        reviews = mergedReviews;
+        for (const id of ids) delete pending[id];
+        savePending();
+        if (mergedTags) {
+          tagOptions = { gyotai: mergedTags["業態"], tags: mergedTags["タグ"] };
+          newTags = { gyotai: [], tags: [] };
+          saveNewTags();
+        }
+        setLastSyncAt(Date.now());
+        toast(`✓ 同期しました（${parts.join("・")}）`);
+        break;
+      } catch (e) {
+        if (attempt === 2) throw e;  // ref 競合等は最新を取り直して最大3回試す
+      }
     }
   } catch (e) {
     toast(`同期失敗: ${e.message}（後で自動再試行します）`, 3000);
@@ -399,10 +444,10 @@ async function pushReviews() {
   }
 }
 function scheduleSync(delay = 60000) {
-  // 評価のたびに1コミットにならないよう、60秒のまとめ送信を既定にする
-  // （最後のタップから60秒後に1回だけ同期。完了画面・画面離脱・手動タップでは即送信）
+  // 評価直後の即時送信を避けるデバウンス。実際の送信可否は pushReviews 側の
+  // 30分スロットルが最終判定する（スロットル中なら残り時間で再スケジュール）
   clearTimeout(syncTimer);
-  syncTimer = setTimeout(pushReviews, delay);
+  syncTimer = setTimeout(() => pushReviews(), delay);
   updateSyncState();
 }
 
@@ -491,9 +536,10 @@ function wireCardCommon(area) {
     input.onblur = commit;
   }
   // 本文が8行に収まる場合は「続きを読む」を出さない。超える場合は折り畳み＋トグル
+  // clientHeight===0 は非表示中の測定（判定不能）なのでトグルを残す（保険）
   const bodyEl = area.querySelector(".body");
   const toggleEl = area.querySelector(".toggleBody");
-  if (bodyEl.scrollHeight <= bodyEl.clientHeight + 2) {
+  if (bodyEl.clientHeight > 0 && bodyEl.scrollHeight <= bodyEl.clientHeight + 2) {
     toggleEl.style.display = "none";
   } else {
     toggleEl.onclick = () => {
@@ -519,7 +565,7 @@ function renderCard() {
     $("progress").textContent = "";
     area.innerHTML = `<div class="done-box"><div class="big">🎉</div>すべて評価済みです<br>
       <small>新しい記事は毎週土曜の収集後に増えます。<br>評価の修正は「一覧」から記事をタップ</small></div>`;
-    pushReviews();
+    pushReviews(true);  // 全件評価完了はスロットルを待たず即同期
     return;
   }
   const item = queue[queueIdx];
@@ -534,6 +580,10 @@ function renderReviewEdit(id) {
   // 一覧から開く「評価の修正」画面。既存の評価内容を事前充填して同じカードUIで編集する
   const rec = pending[id] || reviews[id];
   if (!rec) return;
+  // 先に画面を表示してから描画・行数測定する（非表示中は高さ0になり
+  // 「続きを読む」の表示判定が壊れるため。順序が重要）
+  show("review");
+  queueViewStale = true;  // 評価タブに戻った時はキュー表示を再描画する
   const item = allItems[id] || {
     id, date: (rec.at || "").slice(0, 10), title: rec.title || id,
     media_name: "過去記事（本文データなし）", url: rec.url || "", body_excerpt: "",
@@ -560,12 +610,12 @@ function renderReviewEdit(id) {
   area.querySelector(".adopt").onclick = () => save("採用");
   area.querySelector(".reject").onclick = () => save("不採用");
   area.querySelector("#btnSub").onclick = backToList;
-  show("review");
 }
 function backToList() {
-  renderCard();   // 評価タブを未評価キューの表示に戻す
   renderList();
   show("list");
+  // 評価タブのキュー表示は、次に評価タブを開いた時（表示状態）に再描画する
+  // （非表示のまま renderCard すると行数測定が壊れるため queueViewStale で遅延）
 }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
@@ -714,7 +764,10 @@ function init() {
       show("setup");
     }
   }
-  $("navReview").onclick = () => { show("review"); };
+  $("navReview").onclick = () => {
+    show("review");
+    if (queueViewStale) { queueViewStale = false; renderCard(); }  // 表示してから描画（行数測定のため）
+  };
   $("navList").onclick = () => { renderList(); show("list"); };
   $("navSetup").onclick = () => { show("setup"); };
   $("btnSave").onclick = () => {
@@ -737,9 +790,9 @@ function init() {
     if (document.visibilityState === "visible") scheduleSync(500);
     else pushReviews();  // アプリを離れる時は待たずに送信（失敗しても pending に残る）
   });
-  // ヘッダーの同期表示をタップで即時同期
+  // ヘッダーの同期表示をタップで即時同期（スロットル無視）
   $("syncState").style.cursor = "pointer";
-  $("syncState").onclick = () => { if (Object.keys(pending).length) { clearTimeout(syncTimer); pushReviews(); } };
+  $("syncState").onclick = () => { if (Object.keys(pending).length) { clearTimeout(syncTimer); pushReviews(true); } };
 }
 init();
 </script>
