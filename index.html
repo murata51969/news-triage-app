@@ -67,9 +67,20 @@
   .card .meta { font-size: 12px; color: var(--sub); margin-bottom: 6px; }
   .card h2 { font-size: 17px; line-height: 1.45; margin-bottom: 10px; }
   .card .body {
-    flex: 1; overflow-y: auto; font-size: 14px; line-height: 1.8; color: var(--text);
-    -webkit-overflow-scrolling: touch; padding-bottom: 8px; min-height: 0;
+    font-size: 15px; line-height: 1.8; color: var(--text);
+    -webkit-overflow-scrolling: touch; padding-bottom: 4px;
   }
+  .card .body.clamped {
+    flex: 0 0 auto; display: -webkit-box; -webkit-line-clamp: 8;
+    -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .card .body.expanded { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+  .toggleBody {
+    border: none; background: transparent; color: var(--accent);
+    font-size: 13px; padding: 8px 0 0; text-align: left;
+  }
+  .card .spacer { flex: 1; }
+  .card .body.expanded ~ .spacer { display: none; }
   .card .srclink { margin-top: 12px; }
   .card .srclink a {
     display: block; text-align: center; padding: 13px 0; font-size: 14px; font-weight: 600;
@@ -82,13 +93,12 @@
     border: 1px solid var(--line); border-radius: 10px;
     background: var(--bg); color: var(--text); resize: none; font-family: inherit;
   }
-  .verdicts { display: flex; gap: 8px; margin-top: 12px; }
+  .verdicts { display: flex; gap: 10px; margin-top: 12px; }
   .verdicts button {
-    flex: 1; padding: 16px 0; font-size: 16px; font-weight: 700; color: #fff;
+    flex: 1; padding: 16px 0; font-size: 18px; font-weight: 700; color: #fff;
     border: none; border-radius: 14px; touch-action: manipulation;
   }
   .verdicts .adopt  { background: var(--adopt); }
-  .verdicts .maybe  { background: var(--maybe); }
   .verdicts .reject { background: var(--reject); }
   .subactions { display: flex; justify-content: center; margin-top: 10px; }
   .subactions button {
@@ -194,7 +204,8 @@
 
 const LS_SETTINGS = "nt_settings";
 const API = "https://api.github.com";
-const VERDICTS = ["採用", "候補", "不採用"];
+const VERDICTS = ["採用", "不採用"];              // ○ / × の2択（保存値は従来互換）
+const VLABEL = { "採用": "○ 採用", "不採用": "× 不採用", "候補": "候補" };  // 候補=旧データ表示用
 
 let settings = null;      // {owner, repo, profile, token}
 let demo = false;
@@ -306,7 +317,9 @@ async function pushReviews() {
     syncing = false; updateSyncState();
   }
 }
-function scheduleSync(delay = 2500) {
+function scheduleSync(delay = 60000) {
+  // 評価のたびに1コミットにならないよう、60秒のまとめ送信を既定にする
+  // （最後のタップから60秒後に1回だけ同期。完了画面・画面離脱・手動タップでは即送信）
   clearTimeout(syncTimer);
   syncTimer = setTimeout(pushReviews, delay);
   updateSyncState();
@@ -338,21 +351,33 @@ function renderCard() {
     <div class="card">
       <div class="meta">${item.date}｜${item.media_name}</div>
       <h2>${escapeHtml(item.title)}</h2>
-      <div class="body">${escapeHtml(item.body_excerpt || "（本文抜粋なし）")}</div>
+      <div class="body clamped">${escapeHtml(item.body_excerpt || "（本文抜粋なし）")}</div>
+      <button class="toggleBody">▼ 続きを読む</button>
+      <div class="spacer"></div>
       <div class="srclink"><a href="${encodeURI(item.url)}" target="_blank" rel="noopener">元記事を開く ↗</a></div>
       <div class="notebox"><textarea id="noteInput" rows="2"
         placeholder="メモ（任意）：採用/不採用の理由・判断基準など"></textarea></div>
       <div class="verdicts">
-        <button class="adopt">採用</button>
-        <button class="maybe">候補</button>
-        <button class="reject">不採用</button>
+        <button class="adopt">○ 採用</button>
+        <button class="reject">× 不採用</button>
       </div>
       <div class="subactions"><button id="btnUndo" ${undoStack.length ? "" : "disabled"}>← ひとつ戻す</button></div>
     </div>`;
   area.querySelector(".adopt").onclick = () => rate("採用");
-  area.querySelector(".maybe").onclick = () => rate("候補");
   area.querySelector(".reject").onclick = () => rate("不採用");
   area.querySelector("#btnUndo").onclick = undo;
+  // 本文が8行に収まる場合は「続きを読む」を出さない。超える場合は折り畳み＋トグル
+  const bodyEl = area.querySelector(".body");
+  const toggleEl = area.querySelector(".toggleBody");
+  if (bodyEl.scrollHeight <= bodyEl.clientHeight + 2) {
+    toggleEl.style.display = "none";
+  } else {
+    toggleEl.onclick = () => {
+      const expanded = bodyEl.classList.toggle("expanded");
+      bodyEl.classList.toggle("clamped", !expanded);
+      toggleEl.textContent = expanded ? "▲ たたむ" : "▼ 続きを読む";
+    };
+  }
 }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
@@ -387,10 +412,12 @@ function renderList() {
   const counts = { "採用": 0, "候補": 0, "不採用": 0 };
   const entries = Object.entries(all).sort((a, b) => (b[1].at || "").localeCompare(a[1].at || ""));
   for (const [, r] of entries) if (counts[r.verdict] !== undefined) counts[r.verdict]++;
-  $("summary").innerHTML = VERDICTS.map(v => `<div class="chip">${v}<b>${counts[v]}</b></div>`).join("");
+  // ○/× の2チップ。旧データの「候補」は残っている場合のみ表示
+  const chipKeys = counts["候補"] > 0 ? ["採用", "不採用", "候補"] : VERDICTS;
+  $("summary").innerHTML = chipKeys.map(v => `<div class="chip">${VLABEL[v]}<b>${counts[v]}</b></div>`).join("");
   $("rows").innerHTML = entries.map(([id, r]) => `
     <div class="rowitem" data-id="${id}">
-      <button class="v ${r.verdict}">${r.verdict}</button>
+      <button class="v ${r.verdict}">${VLABEL[r.verdict] || r.verdict}</button>
       <div class="t">${escapeHtml(r.title || id)}<small>${(r.at || "").slice(0, 10)}${id in pending ? "・未同期" : ""}</small>${r.note ? `<small class="note">✎ ${escapeHtml(r.note)}</small>` : ""}</div>
     </div>`).join("") || `<div class="spinner">まだ評価がありません</div>`;
   for (const btn of $("rows").querySelectorAll(".v")) {
@@ -511,8 +538,13 @@ function init() {
   // 画面復帰・オンライン復帰時に未同期分を送る
   window.addEventListener("online", () => scheduleSync(500));
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && Object.keys(pending).length) scheduleSync(500);
+    if (!Object.keys(pending).length) return;
+    if (document.visibilityState === "visible") scheduleSync(500);
+    else pushReviews();  // アプリを離れる時は待たずに送信（失敗しても pending に残る）
   });
+  // ヘッダーの同期表示をタップで即時同期
+  $("syncState").style.cursor = "pointer";
+  $("syncState").onclick = () => { if (Object.keys(pending).length) { clearTimeout(syncTimer); pushReviews(); } };
 }
 init();
 </script>
