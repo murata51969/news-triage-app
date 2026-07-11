@@ -4,6 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ニュース評価</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#2563eb">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="ニュース評価">
 <style>
   :root {
     --bg: #f5f6f8; --card: #ffffff; --text: #1a1a1a; --sub: #667085;
@@ -87,13 +94,26 @@
     color: var(--accent); text-decoration: none;
     border: 1.5px solid var(--accent); border-radius: 12px;
   }
-  .tagbox { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .taggroup { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; }
+  .tglabel {
+    flex-shrink: 0; font-size: 11px; color: var(--sub); padding: 8px 0;
+    width: 34px;
+  }
+  .tagbox { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
   .tagchip {
     padding: 7px 12px; font-size: 13px; border-radius: 999px;
     border: 1px solid var(--line); background: var(--card); color: var(--sub);
     touch-action: manipulation;
   }
   .tagchip.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .tagadd {
+    padding: 7px 12px; font-size: 13px; border-radius: 999px;
+    border: 1px dashed var(--sub); background: transparent; color: var(--sub);
+  }
+  .taginput {
+    padding: 7px 12px; font-size: 16px; border-radius: 999px; width: 10em;
+    border: 1px solid var(--accent); background: var(--bg); color: var(--text);
+  }
   .notebox { margin-top: 10px; }
   .notebox textarea {
     width: 100%; padding: 10px 12px; font-size: 16px; line-height: 1.5;
@@ -217,7 +237,8 @@ const VLABEL = { "採用": "○ 採用", "不採用": "× 不採用", "候補": 
 
 let settings = null;      // {owner, repo, profile, token}
 let demo = false;
-let tagOptions = [];      // reviews/<profile>/tags.json のタグ選択肢
+let tagOptions = { gyotai: [], tags: [] };  // reviews/<profile>/tags.json（業態/タグの2区分）
+let newTags = { gyotai: [], tags: [] };     // 自由入力で追加され tags.json 未反映のもの
 let queue = [];           // 未評価 items
 let queueIdx = 0;
 let reviews = {};         // 同期済み {id: {verdict, at, title, url}}
@@ -258,6 +279,12 @@ function nowIso() {
 function pendingKey() { return `nt_pending_${settings ? settings.profile : "demo"}`; }
 function loadPending() { try { pending = JSON.parse(localStorage.getItem(pendingKey())) || {}; } catch { pending = {}; } }
 function savePending() { localStorage.setItem(pendingKey(), JSON.stringify(pending)); }
+function newTagsKey() { return `nt_newtags_${settings ? settings.profile : "demo"}`; }
+function loadNewTags() {
+  try { newTags = JSON.parse(localStorage.getItem(newTagsKey())) || { gyotai: [], tags: [] }; }
+  catch { newTags = { gyotai: [], tags: [] }; }
+}
+function saveNewTags() { localStorage.setItem(newTagsKey(), JSON.stringify(newTags)); }
 
 /* ---------- GitHub API ---------- */
 async function gh(path, opts = {}) {
@@ -297,21 +324,56 @@ async function fetchReviews() {
   reviews = JSON.parse(b64decodeUtf8(file.content));
   reviewsSha = file.sha;
 }
+function normalizeTagData(data) {
+  // 新形式 {"業態": [...], "タグ": [...]}。旧形式（配列）は「タグ」として解釈
+  const clean = (a) => Array.isArray(a) ? a.filter(t => typeof t === "string" && t) : [];
+  if (Array.isArray(data)) return { gyotai: [], tags: clean(data) };
+  if (data && typeof data === "object")
+    return { gyotai: clean(data["業態"] ?? data.gyotai), tags: clean(data["タグ"] ?? data.tags) };
+  return { gyotai: [], tags: [] };
+}
 async function fetchTags() {
   // タグ選択肢はリポ側 reviews/<profile>/tags.json で管理（無ければタグUI非表示）
   const file = await gh(contentsPath(`reviews/${settings.profile}/tags.json`));
-  if (file.notFound || !file.content) return [];
+  if (file.notFound || !file.content) return { gyotai: [], tags: [] };
+  try { return normalizeTagData(JSON.parse(b64decodeUtf8(file.content))); }
+  catch { return { gyotai: [], tags: [] }; }
+}
+async function pushNewTags() {
+  // 自由入力で追加されたタグを tags.json に書き戻す（次回からチップ表示される）
+  if (demo || (!newTags.gyotai.length && !newTags.tags.length)) return;
   try {
-    const arr = JSON.parse(b64decodeUtf8(file.content));
-    return Array.isArray(arr) ? arr.filter(t => typeof t === "string" && t) : [];
-  } catch { return []; }
+    const file = await gh(contentsPath(`reviews/${settings.profile}/tags.json`));
+    const remote = (file.notFound || !file.content)
+      ? { gyotai: [], tags: [] } : normalizeTagData(JSON.parse(b64decodeUtf8(file.content)));
+    const merged = {
+      "業態": [...new Set([...remote.gyotai, ...newTags.gyotai])],
+      "タグ": [...new Set([...remote.tags, ...newTags.tags])],
+    };
+    const body = {
+      message: `review(${settings.profile}): タグ一覧を更新`,
+      content: b64encodeUtf8(JSON.stringify(merged, null, 2)),
+    };
+    if (!file.notFound && file.sha) body.sha = file.sha;
+    const res = await gh(contentsPath(`reviews/${settings.profile}/tags.json`), {
+      method: "PUT", body: JSON.stringify(body),
+    });
+    if (res.content) {
+      tagOptions = { gyotai: merged["業態"], tags: merged["タグ"] };
+      newTags = { gyotai: [], tags: [] };
+      saveNewTags();
+    }
+  } catch { /* 失敗しても newTags はローカルに残り次回再試行 */ }
 }
 async function pushReviews() {
   if (syncing || demo) return;
   const ids = Object.keys(pending);
-  if (ids.length === 0) { updateSyncState(); return; }
+  const hasNewTags = newTags.gyotai.length || newTags.tags.length;
+  if (ids.length === 0 && !hasNewTags) { updateSyncState(); return; }
   syncing = true; updateSyncState("同期中…");
   try {
+    await pushNewTags();
+    if (ids.length === 0) return;
     // 最新を取得してマージ（他端末との競合にも耐える）
     await fetchReviews();
     const merged = { ...reviews, ...pending };
@@ -353,6 +415,43 @@ function updateSyncState(msg) {
   $("syncState").textContent = msg || (demo ? "デモ" : (n ? `未同期 ${n}件` : "同期済 ✓"));
 }
 
+function knownSuggestions(group) {
+  // サジェスト = tags.json の選択肢 + これまでの評価で使われたタグ
+  const field = group === "gyotai" ? "gyotai" : "tags";
+  const s = new Set(tagOptions[group] || []);
+  for (const r of [...Object.values(reviews), ...Object.values(pending)])
+    for (const t of (r[field] || [])) s.add(t);
+  return [...s];
+}
+function tagSectionHtml(label, group) {
+  const opts = tagOptions[group] || [];
+  const sugg = knownSuggestions(group);
+  return `<div class="taggroup" data-group="${group}">
+    <span class="tglabel">${label}</span>
+    <div class="tagbox">
+      ${opts.map(t => `<button class="tagchip">${escapeHtml(t)}</button>`).join("")}
+      <button class="tagadd">＋</button>
+      <input class="taginput" list="dl-${group}" placeholder="新しい${label}" style="display:none">
+      <datalist id="dl-${group}">${sugg.map(t => `<option value="${escapeHtml(t)}">`).join("")}</datalist>
+    </div>
+  </div>`;
+}
+function addTagChip(grp, group, value) {
+  // 既存チップなら選択状態にするだけ。無ければチップを作り、tags.json へも反映予約
+  for (const chip of grp.querySelectorAll(".tagchip"))
+    if (chip.textContent === value) { chip.classList.add("on"); return; }
+  const addBtn = grp.querySelector(".tagadd");
+  const chip = document.createElement("button");
+  chip.className = "tagchip on";
+  chip.textContent = value;
+  chip.onclick = () => chip.classList.toggle("on");
+  addBtn.parentNode.insertBefore(chip, addBtn);
+  if (!(tagOptions[group] || []).includes(value)) {
+    tagOptions[group].push(value);
+    if (!newTags[group].includes(value)) { newTags[group].push(value); saveNewTags(); }
+    scheduleSync();  // tags.json への書き戻しも同期に乗せる
+  }
+}
 function renderCard() {
   const area = $("cardArea");
   const remaining = queue.length - queueIdx;
@@ -373,8 +472,8 @@ function renderCard() {
       <button class="toggleBody">▼ 続きを読む</button>
       <div class="spacer"></div>
       <div class="srclink"><a href="${encodeURI(item.url)}" target="_blank" rel="noopener">元記事を開く ↗</a></div>
-      ${tagOptions.length ? `<div class="tagbox">${tagOptions.map(t =>
-        `<button class="tagchip">${escapeHtml(t)}</button>`).join("")}</div>` : ""}
+      ${tagSectionHtml("業態", "gyotai")}
+      ${tagSectionHtml("タグ", "tags")}
       <div class="notebox"><textarea id="noteInput" rows="2"
         placeholder="メモ（任意）：採用/不採用の理由・判断基準など"></textarea></div>
       <div class="verdicts">
@@ -386,8 +485,21 @@ function renderCard() {
   area.querySelector(".adopt").onclick = () => rate("採用");
   area.querySelector(".reject").onclick = () => rate("不採用");
   area.querySelector("#btnUndo").onclick = undo;
-  for (const chip of area.querySelectorAll(".tagchip"))
-    chip.onclick = () => chip.classList.toggle("on");
+  for (const grp of area.querySelectorAll(".taggroup")) {
+    const group = grp.dataset.group;
+    for (const chip of grp.querySelectorAll(".tagchip"))
+      chip.onclick = () => chip.classList.toggle("on");
+    const addBtn = grp.querySelector(".tagadd");
+    const input = grp.querySelector(".taginput");
+    addBtn.onclick = () => { addBtn.style.display = "none"; input.style.display = ""; input.focus(); };
+    const commit = () => {
+      const v = input.value.trim();
+      input.value = ""; input.style.display = "none"; addBtn.style.display = "";
+      if (v) addTagChip(grp, group, v);
+    };
+    input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } };
+    input.onblur = commit;
+  }
   // 本文が8行に収まる場合は「続きを読む」を出さない。超える場合は折り畳み＋トグル
   const bodyEl = area.querySelector(".body");
   const toggleEl = area.querySelector(".toggleBody");
@@ -410,7 +522,10 @@ function rate(verdict) {
   const note = noteEl ? noteEl.value.trim() : "";
   const rec = { verdict, at: nowIso(), title: item.title, url: item.url };
   if (note) rec.note = note;  // 判断基準・理由の蓄積（下流の選定基準改善に使う）
-  const tags = [...document.querySelectorAll(".card .tagchip.on")].map(c => c.textContent);
+  const pick = (g) => [...document.querySelectorAll(`.card .taggroup[data-group="${g}"] .tagchip.on`)]
+    .map(c => c.textContent);
+  const gyotai = pick("gyotai"), tags = pick("tags");
+  if (gyotai.length) rec.gyotai = gyotai;  // 業態タグ（通常タグとは別項目）
   if (tags.length) rec.tags = tags;
   pending[item.id] = rec;
   savePending();
@@ -429,9 +544,11 @@ function undo() {
   scheduleSync();
   renderCard();
   if (prev && prev.note && $("noteInput")) $("noteInput").value = prev.note;
-  if (prev && prev.tags)
-    for (const chip of document.querySelectorAll(".card .tagchip"))
-      if (prev.tags.includes(chip.textContent)) chip.classList.add("on");
+  if (prev)
+    for (const [g, arr] of [["gyotai", prev.gyotai], ["tags", prev.tags]])
+      if (arr)
+        for (const chip of document.querySelectorAll(`.card .taggroup[data-group="${g}"] .tagchip`))
+          if (arr.includes(chip.textContent)) chip.classList.add("on");
 }
 
 function renderList() {
@@ -445,7 +562,7 @@ function renderList() {
   $("rows").innerHTML = entries.map(([id, r]) => `
     <div class="rowitem" data-id="${id}">
       <button class="v ${r.verdict}">${VLABEL[r.verdict] || r.verdict}</button>
-      <div class="t">${escapeHtml(r.title || id)}<small>${(r.at || "").slice(0, 10)}${id in pending ? "・未同期" : ""}</small>${(r.tags && r.tags.length) ? `<small class="tags">🏷 ${r.tags.map(escapeHtml).join("・")}</small>` : ""}${r.note ? `<small class="note">✎ ${escapeHtml(r.note)}</small>` : ""}</div>
+      <div class="t">${escapeHtml(r.title || id)}<small>${(r.at || "").slice(0, 10)}${id in pending ? "・未同期" : ""}</small>${(r.gyotai && r.gyotai.length) ? `<small class="tags">🏪 ${r.gyotai.map(escapeHtml).join("・")}</small>` : ""}${(r.tags && r.tags.length) ? `<small class="tags">🏷 ${r.tags.map(escapeHtml).join("・")}</small>` : ""}${r.note ? `<small class="note">✎ ${escapeHtml(r.note)}</small>` : ""}</div>
     </div>`).join("") || `<div class="spinner">まだ評価がありません</div>`;
   for (const btn of $("rows").querySelectorAll(".v")) {
     btn.onclick = (e) => {
@@ -500,6 +617,7 @@ function demoItems() {
 }
 async function start() {
   loadPending();
+  loadNewTags();
   updateSyncState();
   show("review");
   $("cardArea").innerHTML = `<div class="spinner">記事を読み込み中…</div>`;
@@ -508,7 +626,7 @@ async function start() {
     if (demo) {
       items = demoItems();
       reviews = {};
-      tagOptions = ["タグA", "タグB", "タグC"];
+      tagOptions = { gyotai: ["業態A", "業態B"], tags: ["タグA", "タグB", "タグC"] };
     } else {
       await fetchReviews();
       tagOptions = await fetchTags();
